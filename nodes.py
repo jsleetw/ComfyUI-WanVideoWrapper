@@ -2091,6 +2091,13 @@ class WanVideoDecode:
     CATEGORY = "WanVideoWrapper"
 
     def decode(self, vae, samples, enable_vae_tiling, tile_x, tile_y, tile_stride_x, tile_stride_y, normalization="default"):
+        import gc
+        import torch
+        # 強制卸載所有模型 (包括 sampling 模型) 以釋放 VRAM 給 VAE decode
+        log.info("WanVideo VAE Decode: Unloading all models to free VRAM...")
+        mm.unload_all_models()
+        gc.collect()
+        torch.cuda.empty_cache()
         mm.soft_empty_cache()
         video = samples.get("video", None)
         if video is not None:

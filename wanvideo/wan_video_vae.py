@@ -1129,6 +1129,7 @@ class VideoVAE_(nn.Module):
 
 
     def decode(self, z, pbar=True):
+        import gc
         # z: [b,c,t,h,w]
         z = z / self.inv_std.to(z) + self.mean.to(z)
         input_shape = z.shape
@@ -1140,20 +1141,34 @@ class VideoVAE_(nn.Module):
         except:
             pass
         x = self.conv2(z)
+
+        # 改用 list 收集結果，避免在 GPU 上累積
+        out_frames = []
+        batch_size = 32  # 每 32 幀清理一次記憶體
+
         for i in tqdm(range(iter_), desc="WanVAE decoding frames", disable=not pbar):
             self._conv_idx = [0]
-            if i == 0:
-                out = self.decoder(x[:, :, i:i + 1, :, :],
-                                   feat_cache=self._feat_map,
-                                   feat_idx=self._conv_idx)
-            else:
-                out_ = self.decoder(x[:, :, i:i + 1, :, :],
-                                    feat_cache=self._feat_map,
-                                    feat_idx=self._conv_idx)
-                out = torch.cat([out, out_], 2)
+            out_ = self.decoder(x[:, :, i:i + 1, :, :],
+                               feat_cache=self._feat_map,
+                               feat_idx=self._conv_idx)
+            # 立即移到 CPU 避免累積
+            out_frames.append(out_.cpu())
+            del out_
+
+            # 每 batch_size 幀清理一次 CUDA 記憶體
+            if (i + 1) % batch_size == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
 
             if pbar:
                 pbar.update(1)
+
+        # 最後在 CPU 上合併，再移回原本的 device
+        out = torch.cat(out_frames, 2).to(z.device)
+        del out_frames
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if pbar:
             pbar.update_absolute(0)
         self.clear_cache()
