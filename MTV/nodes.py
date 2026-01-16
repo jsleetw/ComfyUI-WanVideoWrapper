@@ -232,15 +232,21 @@ class NLFPredict:
     CATEGORY = "WanVideoWrapper"
 
     def predict(self, model, images, per_batch=-1):
+        import gc
 
         check_jit_script_function()
+
+        # 先清理其他模型的 VRAM
+        mm.soft_empty_cache()
+
         model = model.to(device)
 
         num_images = images.shape[0]
 
-        # Determine batch size
+        # Determine batch size - 如果是 -1，自動設定為 32 (適合 32GB VRAM)
         if per_batch == -1:
-            batch_size = num_images
+            batch_size = 32  # 預設值 (32GB VRAM)
+            log.info(f"NLFPredict: per_batch=-1, using default batch_size={batch_size}")
         else:
             batch_size = per_batch
 
@@ -248,10 +254,14 @@ class NLFPredict:
         all_boxes = []
         all_joints3d_nonparam = []
 
+        log.info(f"NLFPredict: Processing {num_images} images in batches of {batch_size}")
+
         # Process in batches
         for i in range(0, num_images, batch_size):
             end_idx = min(i + batch_size, num_images)
             batch_images = images[i:end_idx]
+
+            log.info(f"NLFPredict: Processing batch {i//batch_size + 1}/{(num_images + batch_size - 1)//batch_size} (frames {i+1}-{end_idx})")
 
             jit_profiling_prev_state = torch._C._jit_set_profiling_executor(True)
             try:
@@ -259,17 +269,30 @@ class NLFPredict:
             finally:
                 torch._C._jit_set_profiling_executor(jit_profiling_prev_state)
 
-            # Collect boxes and joints from this batch
+            # Collect boxes and joints from this batch - 立即移到 CPU
             if 'boxes' in pred:
-                all_boxes.extend(pred['boxes'])
+                all_boxes.extend([box.cpu() for box in pred['boxes']])
             if 'joints3d_nonparam' in pred:
-                all_joints3d_nonparam.extend(pred['joints3d_nonparam'])
+                all_joints3d_nonparam.extend([joints.cpu() for joints in pred['joints3d_nonparam']])
+
+            # 清理這個批次的 CUDA 記憶體
+            del pred
+            del batch_images
+            gc.collect()
+            torch.cuda.empty_cache()
 
         model = model.to(offload_device)
 
-        # Move collected results to offload device
-        all_boxes = [box.to(offload_device) for box in all_boxes]
-        all_joints3d_nonparam = [joints.to(offload_device) for joints in all_joints3d_nonparam]
+        # 最後再清理一次
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Results are already on CPU, move to offload device if needed
+        if offload_device.type != 'cpu':
+            all_boxes = [box.to(offload_device) for box in all_boxes]
+            all_joints3d_nonparam = [joints.to(offload_device) for joints in all_joints3d_nonparam]
+
+        log.info(f"NLFPredict: Completed processing {num_images} images")
 
         # Maintain the original nested format: wrap in a list to match expected structure
         pose_results = {
